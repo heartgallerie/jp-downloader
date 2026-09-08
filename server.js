@@ -37,6 +37,33 @@ function clientKey(req){return req.ip||req.socket.remoteAddress||'unknown'}
 function rateLimited(req){const now=Date.now(),key=clientKey(req),old=(rate.get(key)||[]).filter(t=>now-t<RATE_WINDOW_MS);if(old.length>=RATE_MAX){rate.set(key,old);return true}old.push(now);rate.set(key,old);return false}
 function killProcessTree(p){return new Promise(resolve=>{if(!p||p.killed||p.exitCode!==null)return resolve();if(process.platform==='win32')execFile('taskkill',['/pid',String(p.pid),'/T','/F'],()=>resolve());else{try{p.kill('SIGTERM')}catch{}setTimeout(()=>{try{if(p.exitCode===null)p.kill('SIGKILL')}catch{}resolve()},1500)}})}
 function proc(cmd,args,onLine,job){return new Promise((res,rej)=>{const p=spawn(cmd,args,{windowsHide:true,detached:process.platform!=='win32'});if(job)job.process=p;let err='';p.stdout.on('data',d=>onLine?.(d.toString()));p.stderr.on('data',d=>{const s=d.toString();err+=s;onLine?.(s)});p.on('error',rej);p.on('close',c=>{if(job&&job.process===p)job.process=null;if(job?.cancelled)return rej(Error('Cancelled'));c===0?res():rej(Error(`${cmd} exited with code ${c}\n${err.slice(-2000)}`))})})}
+async function directSources(watch,html,job){
+  const ids=[];
+  const add=id=>{const n=String(id||'').trim();if(/^\d+$/.test(n)&&!ids.includes(n))ids.push(n)};
+  for(const re of [
+    /\/api\/v1\/episodes\/(\d+)\/sources/gi,
+    /["'`]episode[_-]?id["'`]\s*[:=]\s*["']?(\d+)/gi,
+    /["'`]episode["'`]\s*:\s*\{[^{}]*?["'`]id["'`]\s*:\s*["']?(\d+)/gi,
+    /data-episode-id\s*=\s*["'](\d+)["']/gi
+  ]){let m;while((m=re.exec(html||''))&&ids.length<10)add(m[1])}
+  if(!ids.length)return null;
+  const pageUrl=new URL(watch);
+  const headers={accept:'application/json, text/plain, */*',referer:watch,'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36'};
+  for(const id of ids){
+    const api=new URL(`/api/v1/episodes/${id}/sources`,pageUrl.origin).href;
+    try{
+      const r=await fetchWithTimeout(api,{headers});
+      if(!r.ok)continue;
+      const j=await r.json();
+      if(j&&Array.isArray(j.sources)){
+        job.apiUrl=api;
+        job.status='Found video source through the site API.';
+        return j;
+      }
+    }catch(e){console.warn(`[job ${job.id}] direct sources fallback failed for episode ${id}: ${e.message}`)}
+  }
+  return null;
+}
 async function resolve(watch,job){
   job.status='Loading watch page…';
   const browser=await chromium.launch({headless:true});
@@ -52,9 +79,26 @@ async function resolve(watch,job){
     try{await page.waitForLoadState('load',{timeout:10000})}catch{}
     try{await page.locator('main#main h1.cls-watch-title').first().waitFor({state:'visible',timeout:5000})}catch{}
     try{const heading=await page.locator('main#main h1.cls-watch-title').first().innerText({timeout:5000});if(heading.trim())job.displayName=heading.trim().replace(/^Watch\s+/i,'').trim()}catch{}
+    let html='';
+    try{html=await page.content()}catch{}
     const waitForSource=async ms=>{const end=Date.now()+ms;while(!found&&Date.now()<end&&!job.cancelled)await page.waitForTimeout(250);return !!found};
-    await waitForSource(30000);
-    if(!found&&!job.cancelled){console.log(`[job ${job.id}] No sources response after initial load; reloading watch page.`);await page.reload({waitUntil:'domcontentloaded',timeout:REQUEST_TIMEOUT_MS}).catch(()=>{});try{await page.waitForLoadState('load',{timeout:10000})}catch{}await waitForSource(30000)}
+    await waitForSource(12000);
+    if(!found&&!job.cancelled){
+      console.log(`[job ${job.id}] Browser did not expose sources; trying direct sources API fallback.`);
+      const json=await directSources(watch,html,job);
+      if(json)found={apiUrl:job.apiUrl,json};
+    }
+    if(!found&&!job.cancelled){
+      console.log(`[job ${job.id}] Direct fallback found no source; reloading watch page.`);
+      await page.reload({waitUntil:'domcontentloaded',timeout:REQUEST_TIMEOUT_MS}).catch(()=>{});
+      try{await page.waitForLoadState('load',{timeout:10000})}catch{}
+      try{html=await page.content()}catch{}
+      await waitForSource(12000);
+      if(!found&&!job.cancelled){
+        const json=await directSources(watch,html,job);
+        if(json)found={apiUrl:job.apiUrl,json};
+      }
+    }
     if(job.cancelled)throw Error('Cancelled');
     if(!found)throw Error('We could not find a video source on this page. Make sure the URL is a valid supported watch page.');
     const hls=found.json.sources.find(s=>s&&typeof s.file==='string'&&(String(s.type).toLowerCase()==='hls'||/\.m3u8(?:$|\?)/i.test(s.file)));
