@@ -35,7 +35,50 @@ function rateLimited(req){const now=Date.now(),key=clientKey(req),old=(rate.get(
 function activeJobs(){let n=0;for(const j of jobs.values())if(!j.done)n++;return n}
 function killProcessTree(p){return new Promise(resolve=>{if(!p||p.killed||p.exitCode!==null)return resolve();if(process.platform==='win32')execFile('taskkill',['/pid',String(p.pid),'/T','/F'],()=>resolve());else{try{p.kill('SIGTERM')}catch{}setTimeout(()=>{try{if(p.exitCode===null)p.kill('SIGKILL')}catch{}resolve()},1500)}})}
 function proc(cmd,args,onLine,job){return new Promise((res,rej)=>{const p=spawn(cmd,args,{windowsHide:true,detached:process.platform!=='win32'});if(job)job.process=p;let err='';p.stdout.on('data',d=>onLine?.(d.toString()));p.stderr.on('data',d=>{const s=d.toString();err+=s;onLine?.(s)});p.on('error',rej);p.on('close',c=>{if(job&&job.process===p)job.process=null;if(job?.cancelled)return rej(Error('Cancelled'));c===0?res():rej(Error(`${cmd} exited with code ${c}\n${err.slice(-2000)}`))})})}
-async function resolve(watch,job){job.status='Loading watch page…';const browser=await chromium.launch({headless:true});job.browser=browser;try{const page=await browser.newPage({userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36'});let found=null;page.on('response',async r=>{if(!/\/api\/v1\/episodes\/[^/]+\/sources(?:\?|$)/i.test(r.url()))return;try{const j=await r.json();if(j&&Array.isArray(j.sources))found={apiUrl:r.url(),json:j}}catch{}});await page.goto(watch,{waitUntil:'domcontentloaded',timeout:REQUEST_TIMEOUT_MS});try{const heading=await page.locator('main#main h1.cls-watch-title').first().innerText({timeout:5000});if(heading.trim())job.displayName=heading.trim().replace(/^Watch\s+/i,'').trim()}catch{}const end=Date.now()+20000;while(!found&&Date.now()<end&&!job.cancelled)await page.waitForTimeout(250);if(job.cancelled)throw Error('Cancelled');if(!found)throw Error('We could not find a video source on this page. Make sure the URL is a valid supported watch page.');const hls=found.json.sources.find(s=>s&&typeof s.file==='string'&&(String(s.type).toLowerCase()==='hls'||/\.m3u8(?:$|\?)/i.test(s.file)));if(!hls)throw Error('This video does not have a compatible HLS source.');const sourceUrl=mediaValid(hls.file);job.apiUrl=found.apiUrl;job.hlsUrl=sourceUrl.href;job.status='Found HLS source.';return sourceUrl.href}finally{await browser.close().catch(()=>{});job.browser=null}}
+async function resolve(watch,job){
+  job.status='Loading watch page…';
+  const browser=await chromium.launch({headless:true});
+  job.browser=browser;
+  try{
+    const page=await browser.newPage({
+      userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36',
+      viewport:{width:1280,height:720},
+      locale:'en-US'
+    });
+    let found=null;
+    const capture=async r=>{
+      if(found||!/\/api\/v1\/episodes\/[^/]+\/sources(?:\?|$)/i.test(r.url()))return;
+      try{
+        const j=await r.json();
+        if(j&&Array.isArray(j.sources))found={apiUrl:r.url(),json:j};
+      }catch{}
+    };
+    page.on('response',capture);
+    page.on('requestfailed',r=>console.warn(`[job ${job.id}] request failed: ${r.url()} ${r.failure()?.errorText||''}`));
+    page.on('pageerror',e=>console.warn(`[job ${job.id}] page error: ${e.message}`));
+    await page.goto(watch,{waitUntil:'domcontentloaded',timeout:REQUEST_TIMEOUT_MS});
+    try{await page.waitForLoadState('load',{timeout:10000})}catch{}
+    try{await page.locator('main#main h1.cls-watch-title').first().waitFor({state:'visible',timeout:5000})}catch{}
+    try{const heading=await page.locator('main#main h1.cls-watch-title').first().innerText({timeout:5000});if(heading.trim())job.displayName=heading.trim().replace(/^Watch\s+/i,'').trim()}catch{}
+    const waitForSource=async ms=>{const end=Date.now()+ms;while(!found&&Date.now()<end&&!job.cancelled)await page.waitForTimeout(250);return !!found};
+    await waitForSource(30000);
+    if(!found&&!job.cancelled){
+      console.log(`[job ${job.id}] No sources response after initial load; reloading watch page.`);
+      await page.reload({waitUntil:'domcontentloaded',timeout:REQUEST_TIMEOUT_MS}).catch(()=>{});
+      try{await page.waitForLoadState('load',{timeout:10000})}catch{}
+      await waitForSource(30000);
+    }
+    if(job.cancelled)throw Error('Cancelled');
+    if(!found)throw Error('We could not find a video source on this page. Make sure the URL is a valid supported watch page.');
+    const hls=found.json.sources.find(s=>s&&typeof s.file==='string'&&(String(s.type).toLowerCase()==='hls'||/\.m3u8(?:$|\?)/i.test(s.file)));
+    if(!hls)throw Error('This video does not have a compatible HLS source.');
+    const sourceUrl=mediaValid(hls.file);
+    job.apiUrl=found.apiUrl;
+    job.hlsUrl=sourceUrl.href;
+    job.status='Found HLS source.';
+    return sourceUrl.href;
+  }finally{await browser.close().catch(()=>{});job.browser=null}
+}
 async function playlist(hls,dir){const source=mediaValid(hls),base=source.href.endsWith('/')?source.href:source.href+'/';const r=await fetchWithTimeout(new URL('index.json',base));if(!r.ok)throw Error(`Could not fetch the video playlist (${r.status}).`);const lines=(await r.text()).split(/\r?\n/);const out=lines.map(line=>{const t=line.trim();if(!t||t.startsWith('#'))return line;try{return new URL(t,base).href}catch{return t}});for(const line of out){const t=line.trim();if(t&&!t.startsWith('#'))mediaValid(t)}const file=path.join(dir,'local.m3u8');await fsp.writeFile(file,out.join('\n'),'utf8');return file}
 async function duration(file,job){try{const args=['-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1','-protocol_whitelist','file,http,https,tcp,tls,crypto,data','-allowed_extensions','ALL','-extension_picky','0',file];let out='';await proc(FFPROBE,args,x=>out+=x,job);const n=parseFloat(out.trim());return Number.isFinite(n)&&n>0?n:0}catch{return 0}}
 async function convert(job,watch){let dir;try{const u=new URL(watch),parts=u.pathname.split('/').filter(Boolean),slug=parts.pop()||'video',ep=u.searchParams.get('ep');dir=await fsp.mkdtemp(path.join(os.tmpdir(),'hls-converter-'));job.dir=dir;const hls=await resolve(watch,job);if(job.cancelled)throw Error('Cancelled');job.status='Downloading playlist…';const m3u8=await playlist(hls,dir);job.duration=await duration(m3u8,job);if(job.cancelled)throw Error('Cancelled');const sourceName=job.displayName||slug;const name=safeName(ep?`${sourceName}-ep-${ep}`:sourceName);job.name=ep?`${sourceName} · Episode ${ep}`:sourceName;job.filename=`${name}.mp4`;const out=path.join(dir,`${name}.mp4`);job.status='Converting with fast encoding (~2.5× faster)…';await proc(FFMPEG,['-protocol_whitelist','file,http,https,tcp,tls,crypto,data','-allowed_extensions','ALL','-extension_picky','0','-i',m3u8,'-c:v','libx264','-preset','ultrafast','-crf',process.env.FFMPEG_CRF||'20','-c:a','aac','-b:a','192k','-movflags','+faststart',out],line=>{const m=line.match(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/);if(m){job.seconds=+m[1]*3600+ +m[2]*60+ +m[3];if(job.duration)job.progress=Math.min(99,job.seconds/job.duration*100)}},job);if(job.cancelled)throw Error('Cancelled');job.status='Verifying MP4…';await proc(FFPROBE,['-v','error','-show_entries','format=format_name','-of','default=nw=1',out],null,job);if(job.cancelled)throw Error('Cancelled');job.output=out;job.progress=100;job.status='Done';job.done=true}catch(e){if(job.cancelled||e.message==='Cancelled'){job.status='Cancelled';job.error=null}else{console.error(`[job ${job.id}]`,e);job.status='Error';job.error='The conversion failed. Please try again.'}job.done=true}finally{job.process=null;job.browser=null}}
