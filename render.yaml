@@ -7,6 +7,8 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: MAX_CONCURRENT
-        value: "1"
+        value: "3"
+      - key: MAX_QUEUE
+        value: "10"
       - key: RATE_MAX
         value: "5"
