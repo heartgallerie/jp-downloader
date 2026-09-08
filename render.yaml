@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: jp-downloader
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: MAX_CONCURRENT
+        value: "1"
+      - key: RATE_MAX
+        value: "5"
