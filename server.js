@@ -22,7 +22,7 @@ const RATE_MAX = Math.max(1, Number(process.env.RATE_MAX || 5));
 const REQUEST_TIMEOUT_MS = 30000;
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36';
 const SUPPORTED_HOSTS = new Set(['kodasusaka.com','pinkueiga.net','18korean.net','18eu.net','cat3film.com']);
-const MEDIA_HOSTS = new Set((process.env.ALLOWED_MEDIA_HOSTS || 'hls.kodasusaka.com,pk.asuka-vod.site').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
+const MEDIA_HOSTS = new Set((process.env.ALLOWED_MEDIA_HOSTS || 'hls.kodasusaka.com,hls.asuka-vod.site,pk.asuka-vod.site').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
 app.set('trust proxy', 1);
 app.use(helmet({contentSecurityPolicy:false}));
 app.use(express.json({ limit: '10kb' }));
