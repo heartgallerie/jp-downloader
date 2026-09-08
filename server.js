@@ -13,7 +13,7 @@ const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 const jobs = new Map();
 const rate = new Map();
-const MAX_CONCURRENT = Math.max(1, Number(process.env.MAX_CONCURRENT || 2));
+const MAX_CONCURRENT = Math.max(1, Number(process.env.MAX_CONCURRENT || 1));
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const RATE_MAX = Math.max(1, Number(process.env.RATE_MAX || 5));
 const REQUEST_TIMEOUT_MS = 30000;
@@ -24,6 +24,7 @@ app.use(helmet({contentSecurityPolicy:false}));
 app.use(express.json({ limit: '10kb' }));
 app.get('/', async (req,res,next)=>{try{const file=path.join(__dirname,'public','index.html');let html=await fsp.readFile(file,'utf8');res.send(html)}catch(e){next(e)}});
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/api/health',(req,res)=>res.json({ok:true}));
 function safeName(s){return(s||'video').replace(/[^a-z0-9._ -]+/gi,'-').replace(/^[- ]+|[- ]+$/g,'').slice(0,120)||'video'}
 function hostAllowed(host,allow){const h=String(host||'').toLowerCase().replace(/\.$/,'');for(const base of allow)if(h===base||h.endsWith('.'+base))return true;return false}
 function valid(raw){const u=new URL(raw);if(!['http:','https:'].includes(u.protocol))throw Error('Only HTTP(S) URLs are supported.');if(!hostAllowed(u.hostname,SUPPORTED_HOSTS))throw Error('This site is not supported.');if(!/^\/watch\/[^/]+\/?$/i.test(u.pathname))throw Error('Please enter a supported watch-page URL.');return u}
@@ -44,4 +45,4 @@ app.delete('/api/jobs/:id',async(req,res)=>{const j=jobs.get(req.params.id);if(!
 app.get('/api/jobs/:id/download',(req,res)=>{const j=jobs.get(req.params.id);if(!j?.output||!j.done||!fs.existsSync(j.output))return res.status(404).send('File is not ready.');const requested=typeof req.query.name==='string'?req.query.name.trim():'';const filename=requested?`${safeName(requested.replace(/\.mp4$/i,''))}.mp4`:(j.filename||'video.mp4');res.download(j.output,filename,async()=>{try{await fsp.rm(j.dir,{recursive:true,force:true})}catch{}jobs.delete(j.id)})});
 app.get('/api/jobs/:id/stream',(req,res)=>{const j=jobs.get(req.params.id);if(!j?.output||!j.done||!fs.existsSync(j.output))return res.status(404).send('File is not ready.');res.sendFile(j.output,{headers:{'Content-Type':'video/mp4','Accept-Ranges':'bytes','Content-Disposition':'inline'}})});
 setInterval(async()=>{const cut=Date.now()-7200000;for(const[id,j]of jobs)if(j.createdAt<cut){try{if(j.process)await killProcessTree(j.process)}catch{}try{if(j.browser)await j.browser.close()}catch{}try{if(j.dir)await fsp.rm(j.dir,{recursive:true,force:true})}catch{}jobs.delete(id)}for(const[key,times]of rate){if(!times.some(t=>Date.now()-t<RATE_WINDOW_MS))rate.delete(key)}},600000).unref();
-app.listen(PORT,()=>console.log(`JP Downloader: http://localhost:${PORT}`));
+app.listen(PORT,'0.0.0.0',()=>console.log(`JP Downloader listening on port ${PORT}`));
