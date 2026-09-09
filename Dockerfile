@@ -13,6 +13,8 @@ RUN apt-get update \
 COPY package.json ./
 RUN npm install --omit=dev
 
+COPY server_fast.js ./
+COPY client-fast.js ./
 COPY server.js ./
 COPY public ./public
 
