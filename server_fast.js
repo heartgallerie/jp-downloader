@@ -35,7 +35,7 @@ function renderIndex(){
   for(const raw of assets)html=html.split(raw).join(assetProxy(raw));
   html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'');
   html=html.replace(/<script\s+src=["'][^"']*client-fast\.js[^"']*["'][^>]*><\/script>/gi,'');
-  html=html.replace('</body>','<script src="/client-fast.js?v=5"></script></body>');
+  html=html.replace('</body>','<script src="/client-fast.js?v=6"></script></body>');
   return html;
 }
 app.get('/',(req,res)=>{try{res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');res.type('html').send(renderIndex())}catch(e){console.error('[HTTP] renderIndex failed',e);res.sendStatus(500)}});
@@ -45,51 +45,37 @@ app.use(express.static(PUBLIC,{maxAge:'1h'}));
 app.get('/assets/proxy',async(req,res)=>{try{
   const raw=String(req.query.url||'');
   if(!assetOk(raw))return res.sendStatus(400);
-  const u=new URL(raw);
-  const site=`https://${host(u.hostname)}/`;
-  const r=await fetch(u,{redirect:'follow',signal:AbortSignal.timeout(20000),headers:{
-    'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0',
-    'accept':'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-    'accept-language':'en-US,en;q=0.9','referer':site,'origin':site.slice(0,-1)
-  }});
+  const u=new URL(raw);const site=`https://${host(u.hostname)}/`;
+  const r=await fetch(u,{redirect:'follow',signal:AbortSignal.timeout(20000),headers:{'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0','accept':'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8','accept-language':'en-US,en;q=0.9','referer':site,'origin':site.slice(0,-1)}});
   if(!r.ok)return res.status(r.status).send(`Asset upstream HTTP ${r.status}`);
   const type=r.headers.get('content-type')||'';
   if(!type.startsWith('image/'))return res.status(415).send('Asset upstream did not return an image.');
-  res.set('Cache-Control','public,max-age=86400');res.set('Content-Type',type);res.set('X-Content-Type-Options','nosniff');
-  res.send(Buffer.from(await r.arrayBuffer()));
+  res.set('Cache-Control','public,max-age=86400');res.set('Content-Type',type);res.set('X-Content-Type-Options','nosniff');res.send(Buffer.from(await r.arrayBuffer()));
 }catch(e){console.error('[ASSET] failed',e);res.status(502).send(e.message||'Asset proxy failed.')}});
 
 app.get('/api/media',async(req,res)=>{try{
-  const raw=String(req.query.url||'');
-  console.log(`[MEDIA] ${raw}`);
+  const raw=String(req.query.url||'');console.log(`[MEDIA] ${raw}`);
   if(!mediaOk(raw))return res.status(400).send('Unsupported media URL.');
-  const u=new URL(raw);const headers={};
-  if(req.query.referer)headers.referer=String(req.query.referer);
+  const u=new URL(raw);const headers={};if(req.query.referer)headers.referer=String(req.query.referer);
   const r=await fetch(u,{headers,redirect:'follow',signal:AbortSignal.timeout(30000)});
   if(!r.ok)return res.status(r.status).send(`Upstream HTTP ${r.status}`);
-  res.set('Cache-Control','no-store');res.set('Content-Type',r.headers.get('content-type')||'application/octet-stream');
-  res.send(Buffer.from(await r.arrayBuffer()));
+  res.set('Cache-Control','no-store');res.set('Content-Type',r.headers.get('content-type')||'application/octet-stream');res.send(Buffer.from(await r.arrayBuffer()));
 }catch(e){console.error('[MEDIA] failed',e);res.status(502).send(e.message||'Media proxy failed.')}});
 
 async function text(url,headers={},ms=12000){console.log(`[FETCH] ${url}`);const r=await fetch(url,{headers,signal:AbortSignal.timeout(ms)});if(!r.ok)throw Error(`HTTP ${r.status}`);return r.text()}
 function sourceApi(site,id){return`https://${site}/api/v1/episodes/${encodeURIComponent(id)}/sources`}
 function makeJob(url){const j={id:crypto.randomUUID(),url,status:'Finding video',progress:0,source:null,error:null};jobs.set(j.id,j);console.log(`[JOB ${j.id}] created for ${url}`);return j}
 async function discover(watch,j){const u=new URL(watch),site=host(u.hostname);let browser;console.log(`[JOB ${j.id}] discover start: ${watch}`);try{
-  j.status='Finding video';j.progress=5;
-  console.log(`[JOB ${j.id}] launching Playwright`);browser=await chromium.launch({headless:true});
+  j.status='Finding video';j.progress=5;console.log(`[JOB ${j.id}] launching Playwright`);browser=await chromium.launch({headless:true});
   const page=await browser.newPage();let captured=null;
   page.on('response',async r=>{if(/\/api\/v1\/episodes\/[^/]+\/sources(?:\?|$)/.test(r.url())){console.log(`[JOB ${j.id}] captured source API: ${r.url()}`);try{captured=await r.json();console.log(`[JOB ${j.id}] source API parsed`)}catch(e){console.error(`[JOB ${j.id}] source API JSON failed`,e.message)}}});
-  console.log(`[JOB ${j.id}] opening watch page`);await page.goto(watch,{waitUntil:'domcontentloaded',timeout:20000});
-  console.log(`[JOB ${j.id}] watch page loaded`);j.status='Getting video source';j.progress=25;
+  console.log(`[JOB ${j.id}] opening watch page`);await page.goto(watch,{waitUntil:'domcontentloaded',timeout:20000});console.log(`[JOB ${j.id}] watch page loaded`);j.status='Getting video source';j.progress=25;
   const html=await page.content();
-  const ids=[...html.matchAll(/(?:episode(?:Id|ID)|episode_id|episodeId)\s*["'=:]+\s*["']?([A-Za-z0-9_-]{3,})/gi)].map(m=>m[1]);
-  console.log(`[JOB ${j.id}] episode IDs found: ${[...new Set(ids)].slice(0,12).join(', ')||'none'}`);
-  const pick=d=>(d?.sources||[]).find(x=>x&&typeof x.file==='string'&&/^https:\/\//.test(x.file));
-  let h=pick(captured);
+  const ids=[...html.matchAll(/(?:episode(?:Id|ID)|episode_id|episodeId)\s*["'=:]+\s*["']?([A-Za-z0-9_-]{3,})/gi)].map(m=>m[1]);console.log(`[JOB ${j.id}] episode IDs found: ${[...new Set(ids)].slice(0,12).join(', ')||'none'}`);
+  const pick=d=>(d?.sources||[]).find(x=>x&&typeof x.file==='string'&&/^https:\/\//.test(x.file));let h=pick(captured);
   if(h){console.log(`[JOB ${j.id}] source found: ${h.file}`);return{url:h.file,headers:{referer:watch,origin:`https://${site}`}}}
   for(const id of [...new Set(ids)].slice(0,12)){try{const d=JSON.parse(await text(sourceApi(site,id),{accept:'application/json',referer:watch,origin:`https://${site}`}));h=pick(d);if(h){console.log(`[JOB ${j.id}] source found via ID ${id}: ${h.file}`);return{url:h.file,headers:{referer:watch,origin:`https://${site}`}}}}catch(e){console.log(`[JOB ${j.id}] source ID ${id} failed: ${e.message}`)}}
-  console.log(`[JOB ${j.id}] waiting for delayed source response`);await page.waitForTimeout(3500);
-  h=pick(captured);
+  console.log(`[JOB ${j.id}] waiting for delayed source response`);await page.waitForTimeout(3500);h=pick(captured);
   if(h){console.log(`[JOB ${j.id}] delayed source found: ${h.file}`);return{url:h.file,headers:{referer:watch,origin:`https://${site}`}}}
   throw Error('Could not find the video source on this page.');
 }finally{if(browser)await browser.close().catch(e=>console.error(`[JOB ${j.id}] browser close failed`,e.message))}}
@@ -99,5 +85,11 @@ app.post('/api/convert',(req,res)=>{const raw=String(req.body?.url||'').trim();c
 app.get('/api/jobs/:id',(req,res)=>{const j=jobs.get(req.params.id);if(!j)return res.status(404).json({error:'Job not found.'});console.log(`[JOB ${j.id}] status=${j.status} progress=${j.progress} source=${!!j.source}`);res.json({id:j.id,status:j.status,progress:j.progress,sourceReady:!!j.source,error:j.error})});
 app.get('/api/jobs/:id/source',(req,res)=>{const j=jobs.get(req.params.id);if(!j)return res.status(404).json({error:'Job not found.'});console.log(`[JOB ${j.id}] source requested; ready=${!!j.source}`);if(!j.source)return res.status(409).json({error:'Source not ready.'});res.json(j.source)});
 app.delete('/api/jobs/:id',(req,res)=>{console.log(`[JOB ${req.params.id}] deleted`);jobs.delete(req.params.id);res.json({ok:true})});
-app.use((req,res)=>{console.log(`[HTTP] 404 ${req.method} ${req.originalUrl}`);if(req.method==='GET'&&req.accepts('html')){try{res.set('Cache-Control','no-store');res.type('html').send(renderIndex())}catch(e){console.error('[HTTP] fallback render failed',e);return res.sendStatus(500)}}else res.sendStatus(404)});
+app.use((req,res)=>{
+  console.log(`[HTTP] 404 ${req.method} ${req.originalUrl}`);
+  const pathname=req.path||'';
+  const wantsHtml=req.method==='GET'&&req.accepts('html')&&!pathname.includes('.')&&!pathname.startsWith('/api/')&&!pathname.startsWith('/assets/');
+  if(wantsHtml){try{res.set('Cache-Control','no-store');res.type('html').send(renderIndex())}catch(e){console.error('[HTTP] fallback render failed',e);return res.sendStatus(500)}}
+  else res.sendStatus(404);
+});
 app.listen(PORT,()=>console.log(`JP Downloader listening on ${PORT}`));
