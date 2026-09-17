@@ -35,10 +35,21 @@ function renderIndex(){
   for(const raw of assets)html=html.split(raw).join(assetProxy(raw));
   html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'');
   html=html.replace(/<script\s+src=["'][^"']*client-fast\.js[^"']*["'][^>]*><\/script>/gi,'');
-  html=html.replace('</body>','<script src="/client-fast.js?v=6"></script></body>');
+  html=html.replace('</body>','<script src="/client-fast.js?v=7" defer></script></body>');
   return html;
 }
 app.get('/',(req,res)=>{try{res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');res.type('html').send(renderIndex())}catch(e){console.error('[HTTP] renderIndex failed',e);res.sendStatus(500)}});
+
+// Serve the client explicitly so it can never fall through to the HTML SPA fallback.
+app.get('/client-fast.js',(req,res)=>{
+  console.log('[CLIENT] serving client-fast.js');
+  res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');
+  res.set('Pragma','no-cache');
+  res.set('Expires','0');
+  res.type('application/javascript').sendFile(path.join(__dirname,'client-fast.js'),err=>{
+    if(err)console.error('[CLIENT] sendFile failed:',err.message);
+  });
+});
 
 app.use(express.static(PUBLIC,{maxAge:'1h'}));
 
