@@ -35,22 +35,18 @@ function renderIndex(){
   for(const raw of assets)html=html.split(raw).join(assetProxy(raw));
   html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'');
   html=html.replace(/<script\s+src=["'][^"']*client-fast\.js[^"']*["'][^>]*><\/script>/gi,'');
-  html=html.replace('</body>','<script src="/client-fast.js?v=7" defer></script></body>');
+  html=html.replace('</body>','<script src="/client-fast.js?v=8" defer></script></body>');
   return html;
 }
 app.get('/',(req,res)=>{try{res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');res.type('html').send(renderIndex())}catch(e){console.error('[HTTP] renderIndex failed',e);res.sendStatus(500)}});
 
-// Serve the client explicitly so it can never fall through to the HTML SPA fallback.
 app.get('/client-fast.js',(req,res)=>{
   console.log('[CLIENT] serving client-fast.js');
   res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');
   res.set('Pragma','no-cache');
   res.set('Expires','0');
-  res.type('application/javascript').sendFile(path.join(__dirname,'client-fast.js'),err=>{
-    if(err)console.error('[CLIENT] sendFile failed:',err.message);
-  });
+  res.type('application/javascript').sendFile(path.join(__dirname,'client-fast.js'),err=>{if(err)console.error('[CLIENT] sendFile failed:',err.message)});
 });
-
 app.use(express.static(PUBLIC,{maxAge:'1h'}));
 
 app.get('/assets/proxy',async(req,res)=>{try{
@@ -76,26 +72,90 @@ app.get('/api/media',async(req,res)=>{try{
 async function text(url,headers={},ms=12000){console.log(`[FETCH] ${url}`);const r=await fetch(url,{headers,signal:AbortSignal.timeout(ms)});if(!r.ok)throw Error(`HTTP ${r.status}`);return r.text()}
 function sourceApi(site,id){return`https://${site}/api/v1/episodes/${encodeURIComponent(id)}/sources`}
 function makeJob(url){const j={id:crypto.randomUUID(),url,status:'Finding video',progress:0,source:null,error:null};jobs.set(j.id,j);console.log(`[JOB ${j.id}] created for ${url}`);return j}
-async function discover(watch,j){const u=new URL(watch),site=host(u.hostname);let browser;console.log(`[JOB ${j.id}] discover start: ${watch}`);try{
-  j.status='Finding video';j.progress=5;console.log(`[JOB ${j.id}] launching Playwright`);browser=await chromium.launch({headless:true});
-  const page=await browser.newPage();let captured=null;
-  page.on('response',async r=>{if(/\/api\/v1\/episodes\/[^/]+\/sources(?:\?|$)/.test(r.url())){console.log(`[JOB ${j.id}] captured source API: ${r.url()}`);try{captured=await r.json();console.log(`[JOB ${j.id}] source API parsed`)}catch(e){console.error(`[JOB ${j.id}] source API JSON failed`,e.message)}}});
-  console.log(`[JOB ${j.id}] opening watch page`);await page.goto(watch,{waitUntil:'domcontentloaded',timeout:20000});console.log(`[JOB ${j.id}] watch page loaded`);j.status='Getting video source';j.progress=25;
-  const html=await page.content();
-  const ids=[...html.matchAll(/(?:episode(?:Id|ID)|episode_id|episodeId)\s*["'=:]+\s*["']?([A-Za-z0-9_-]{3,})/gi)].map(m=>m[1]);console.log(`[JOB ${j.id}] episode IDs found: ${[...new Set(ids)].slice(0,12).join(', ')||'none'}`);
-  const pick=d=>(d?.sources||[]).find(x=>x&&typeof x.file==='string'&&/^https:\/\//.test(x.file));let h=pick(captured);
-  if(h){console.log(`[JOB ${j.id}] source found: ${h.file}`);return{url:h.file,headers:{referer:watch,origin:`https://${site}`}}}
-  for(const id of [...new Set(ids)].slice(0,12)){try{const d=JSON.parse(await text(sourceApi(site,id),{accept:'application/json',referer:watch,origin:`https://${site}`}));h=pick(d);if(h){console.log(`[JOB ${j.id}] source found via ID ${id}: ${h.file}`);return{url:h.file,headers:{referer:watch,origin:`https://${site}`}}}}catch(e){console.log(`[JOB ${j.id}] source ID ${id} failed: ${e.message}`)}}
-  console.log(`[JOB ${j.id}] waiting for delayed source response`);await page.waitForTimeout(3500);h=pick(captured);
-  if(h){console.log(`[JOB ${j.id}] delayed source found: ${h.file}`);return{url:h.file,headers:{referer:watch,origin:`https://${site}`}}}
-  throw Error('Could not find the video source on this page.');
-}finally{if(browser)await browser.close().catch(e=>console.error(`[JOB ${j.id}] browser close failed`,e.message))}}
 
-app.get('/api/health',(q,r)=>r.json({ok:true,clientSide:true}));
-app.post('/api/convert',(req,res)=>{const raw=String(req.body?.url||'').trim();console.log(`[API] /api/convert requested: ${raw||'(empty)'}`);if(!watchOk(raw)){console.log('[API] rejected unsupported watch URL');return res.status(400).json({error:'Enter a supported watch URL.'})}const j=makeJob(raw);res.json({jobId:j.id});discover(raw,j).then(s=>{if(!mediaOk(s.url))throw Error('Unsupported media source.');j.source=s;j.status='Ready to download';j.progress=100;console.log(`[JOB ${j.id}] READY: ${s.url}`)}).catch(e=>{j.status='Failed';j.error=e.message||'Source discovery failed.';console.error(`[JOB ${j.id}] FAILED: ${j.error}`)})});
-app.get('/api/jobs/:id',(req,res)=>{const j=jobs.get(req.params.id);if(!j)return res.status(404).json({error:'Job not found.'});console.log(`[JOB ${j.id}] status=${j.status} progress=${j.progress} source=${!!j.source}`);res.json({id:j.id,status:j.status,progress:j.progress,sourceReady:!!j.source,error:j.error})});
-app.get('/api/jobs/:id/source',(req,res)=>{const j=jobs.get(req.params.id);if(!j)return res.status(404).json({error:'Job not found.'});console.log(`[JOB ${j.id}] source requested; ready=${!!j.source}`);if(!j.source)return res.status(409).json({error:'Source not ready.'});res.json(j.source)});
-app.delete('/api/jobs/:id',(req,res)=>{console.log(`[JOB ${req.params.id}] deleted`);jobs.delete(req.params.id);res.json({ok:true})});
+function pickSource(data){
+  const seen=new Set();
+  function walk(v,depth=0){
+    if(depth>6||v==null)return null;
+    if(typeof v==='string'){
+      try{if(/^https:\/\//.test(v)&&mediaOk(v))return{url:v}}catch{}
+      return null;
+    }
+    if(Array.isArray(v)){for(const x of v){const found=walk(x,depth+1);if(found)return found}return null}
+    if(typeof v==='object'){
+      if(seen.has(v))return null;
+      seen.add(v);
+      if(typeof v.file==='string'&&/^https:\/\//.test(v.file)){try{if(mediaOk(v.file))return{url:v.file,type:v.type||'hls'}}catch{}}
+      for(const k of Object.keys(v)){const found=walk(v[k],depth+1);if(found)return found}
+    }
+    return null;
+  }
+  return walk(data);
+}
+
+async function discover(watch,j){
+  const u=new URL(watch),site=host(u.hostname);let browser;
+  console.log(`[JOB ${j.id}] discover start: ${watch}`);
+  try{
+    j.status='Finding video';j.progress=5;
+    console.log(`[JOB ${j.id}] launching Playwright`);
+    browser=await chromium.launch({headless:true});
+    const context=await browser.newContext({viewport:{width:1280,height:800},userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0'});
+    const page=await context.newPage();
+    let captured=null;
+    const inspectResponse=async r=>{
+      const url=r.url();
+      const interesting=/\/api\/|sources|episode|player|stream|\.m3u8|\.json/i.test(url);
+      if(!interesting)return;
+      try{
+        const type=(r.headers()['content-type']||'').toLowerCase();
+        if(!type.includes('json')&&!/sources|episode|player|stream/i.test(url))return;
+        const data=await r.json();
+        const found=pickSource(data);
+        if(found){captured={...found,sourceUrl:url};console.log(`[JOB ${j.id}] source captured from ${url}: ${found.url}`)}
+        else console.log(`[JOB ${j.id}] inspected response: ${url}`);
+      }catch{}
+    };
+    page.on('response',inspectResponse);
+    page.on('requestfailed',r=>{if(/api|episode|player|stream|source/i.test(r.url()))console.log(`[JOB ${j.id}] request failed: ${r.url()} :: ${r.failure()?.errorText||'unknown'}`)});
+
+    console.log(`[JOB ${j.id}] opening watch page in isolated Playwright session; user's browser is untouched`);
+    await page.goto(watch,{waitUntil:'domcontentloaded',timeout:30000});
+    console.log(`[JOB ${j.id}] watch page loaded at ${page.url()}`);
+    j.status='Getting video source';j.progress=25;
+    try{await page.waitForLoadState('networkidle',{timeout:8000})}catch{}
+    await page.waitForTimeout(1500);
+
+    const frames=page.frames();
+    console.log(`[JOB ${j.id}] frames: ${frames.map(f=>f.url()).join(' | ')}`);
+    const allHtml=[];
+    for(const frame of frames){try{allHtml.push(await frame.content())}catch{}}
+    const joined=allHtml.join('\n');
+    const ids=[...joined.matchAll(/(?:episode(?:Id|ID)|episode_id|episodeId)\s*["'=:]+\s*["']?([A-Za-z0-9_-]{3,})/gi)].map(m=>m[1]);
+    console.log(`[JOB ${j.id}] episode IDs found: ${[...new Set(ids)].slice(0,20).join(', ')||'none'}`);
+
+    if(captured){console.log(`[JOB ${j.id}] source found from player network: ${captured.url}`);return{url:captured.url,headers:{referer:watch,origin:`https://${site}`}}}
+
+    for(const id of [...new Set(ids)].slice(0,20)){
+      try{
+        const d=JSON.parse(await text(sourceApi(site,id),{accept:'application/json',referer:watch,origin:`https://${site}`},15000));
+        const found=pickSource(d);
+        if(found){console.log(`[JOB ${j.id}] source found via ID ${id}: ${found.url}`);return{url:found.url,headers:{referer:watch,origin:`https://${site}`}}}
+      }catch(e){console.log(`[JOB ${j.id}] source ID ${id} failed: ${e.message}`)}
+    }
+
+    console.log(`[JOB ${j.id}] waiting for delayed player source response`);
+    await page.waitForTimeout(4000);
+    if(captured){console.log(`[JOB ${j.id}] delayed source found: ${captured.url}`);return{url:captured.url,headers:{referer:watch,origin:`https://${site}`}}}
+    throw Error('Could not find the video source on this page. The player may have changed its source API.');
+  }finally{if(browser)await browser.close().catch(e=>console.error(`[JOB ${j.id}] browser close failed`,e.message))}
+}
+
+app.get('/api/health',(q,r)=>r.set('Cache-Control','no-store').json({ok:true,clientSide:true}));
+app.post('/api/convert',(req,res)=>{const raw=String(req.body?.url||'').trim();console.log(`[API] /api/convert requested: ${raw||'(empty)'}`);if(!watchOk(raw)){console.log('[API] rejected unsupported watch URL');return res.status(400).json({error:'Enter a supported watch URL.'})}const j=makeJob(raw);res.set('Cache-Control','no-store');res.json({jobId:j.id});discover(raw,j).then(s=>{if(!mediaOk(s.url))throw Error('Unsupported media source.');j.source=s;j.status='Ready to download';j.progress=100;console.log(`[JOB ${j.id}] READY: ${s.url}`)}).catch(e=>{j.status='Failed';j.error=e.message||'Source discovery failed.';console.error(`[JOB ${j.id}] FAILED: ${j.error}`)})});
+app.get('/api/jobs/:id',(req,res)=>{const j=jobs.get(req.params.id);if(!j)return res.status(404).json({error:'Job not found.'});res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');console.log(`[JOB ${j.id}] status=${j.status} progress=${j.progress} source=${!!j.source}`);res.json({id:j.id,status:j.status,progress:j.progress,sourceReady:!!j.source,error:j.error})});
+app.get('/api/jobs/:id/source',(req,res)=>{const j=jobs.get(req.params.id);if(!j)return res.status(404).json({error:'Job not found.'});res.set('Cache-Control','no-store');console.log(`[JOB ${j.id}] source requested; ready=${!!j.source}`);if(!j.source)return res.status(409).json({error:'Source not ready.'});res.json(j.source)});
+app.delete('/api/jobs/:id',(req,res)=>{console.log(`[JOB ${req.params.id}] deleted`);jobs.delete(req.params.id);res.set('Cache-Control','no-store');res.json({ok:true})});
 app.use((req,res)=>{
   console.log(`[HTTP] 404 ${req.method} ${req.originalUrl}`);
   const pathname=req.path||'';
