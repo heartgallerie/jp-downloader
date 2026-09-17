@@ -10,107 +10,13 @@ async function json(url,options={}){const r=await fetch(url,options);let d={};tr
 async function getJob(id=jobId){return json(`/api/jobs/${id}`)}
 async function getSource(id=jobId){return json(`/api/jobs/${id}/source`)}
 function playlistUrl(raw){let u=String(raw||'').trim();if(!u)return u;if(/\/index\.json(?:[?#].*)?$/i.test(u))return u;return u.replace(/\/+$/,'')+'/index.json'}
-function parsePlaylist(text,base){
-  const lines=text.replace(/\r/g,'').split('\n'),segments=[];
-  for(let i=0;i<lines.length;i++){const x=lines[i].trim();if(!x||x.startsWith('#'))continue;try{segments.push({line:i,url:new URL(x,base).href})}catch{}}
-  if(!segments.length)throw Error('No video segments found in playlist.');
-  return{lines,segments};
-}
-async function mediaFetch(url,headers={}){
-  if(cancelled)throw Error('Cancelled.');
-  try{const r=await fetch(url,{cache:'no-store',signal:controller?.signal});if(r.ok)return r;}catch(e){if(cancelled)throw Error('Cancelled.')}
-  const ref=headers.referer?`&referer=${encodeURIComponent(headers.referer)}`:'';
-  const r=await fetch(`/api/media?url=${encodeURIComponent(url)}${ref}`,{cache:'no-store',signal:controller?.signal});
-  if(!r.ok)throw Error(`Media request failed (HTTP ${r.status}).`);
-  return r;
-}
-async function waitForSource(id){
-  for(;;){
-    if(cancelled)throw Error('Cancelled.');
-    const j=await getJob(id);
-    if(j.sourceReady)return getSource(id);
-    if(j.error)throw Error(j.error);
-    await wait(500);
-  }
-}
-async function discoverSource(){
-  const watch=input.value.trim();
-  if(!watch)throw Error('Paste a watch URL first.');
-  const d=await json('/api/convert',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:watch}),signal:controller?.signal});
-  sourceJobId=d.jobId;
-  return waitForSource(sourceJobId);
-}
-async function loadFFmpeg(){
-  setStatus('Loading local converter…',3);
-  if(ffmpeg&&ffmpeg.loaded)return ffmpeg;
-  const m=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js');
-  const u=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/dist/esm/index.js');
-  ffmpeg=new m.FFmpeg();
-  ffmpeg.on('progress',({progress:p})=>{if(!cancelled)setStatus('Converting on your PC…',70+Math.min(30,p*30))});
-  await ffmpeg.load({coreURL:await u.toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js','text/javascript'),wasmURL:await u.toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm','application/wasm')});
-  return ffmpeg;
-}
-function createChoiceUI(){
-  if(document.getElementById('sourceChoices'))return;
-  const box=document.createElement('div');
-  box.id='sourceChoices';
-  box.innerHTML=`<div class="source-choice-title">What would you like to do?</div><div class="source-choice-sub">Choose how you want to process the video.</div><div class="source-choice-actions"><button type="button" class="secondary" id="copySource">Copy source link</button><button type="button" class="primary" id="convertOnSite">Convert on-site</button></div><div id="sourceChoiceStatus" class="source-choice-status"></div>`;
-  form.insertAdjacentElement('afterend',box);
-  const copy=$('copySource'),site=$('convertOnSite'),status=$('sourceChoiceStatus');
-  copy.onclick=async()=>{
-    if(copy.disabled)return;
-    cancelled=false;controller=new AbortController();copy.disabled=true;site.disabled=true;status.textContent='Finding video source…';
-    try{
-      localStorage.setItem('jpDownloaderLastUrl',input.value.trim());
-      const src=await discoverSource();
-      const link=playlistUrl(src.url);
-      await navigator.clipboard.writeText(link);
-      status.textContent='Source link copied.';
-    }catch(err){status.textContent=err.name==='AbortError'?'Cancelled.':(err.message||'Could not find the source.')}
-    finally{copy.disabled=false;site.disabled=false;controller=null}
-  };
-  site.onclick=()=>runConversion();
-}
-async function runConversion(){
-  if(convert.disabled)return;
-  cancelled=false;controller=new AbortController();
-  panel.classList.remove('hidden');actions.classList.add('hidden');actions.innerHTML='';error.classList.add('hidden');videoWrap.classList.add('hidden');video.removeAttribute('src');convert.disabled=true;cancel.disabled=false;cancel.textContent='Cancel';
-  if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null}
-  const watch=input.value.trim();
-  try{
-    if(!watch)throw Error('Paste a watch URL first.');
-    localStorage.setItem('jpDownloaderLastUrl',watch);
-    setStatus('Starting…',1);
-    const d=await json('/api/convert',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:watch}),signal:controller.signal});
-    jobId=d.jobId;
-    for(;;){if(cancelled)throw Error('Cancelled.');const j=await getJob();setStatus(j.status,Math.min(15,j.progress||0));if(j.sourceReady)break;if(j.error)throw Error(j.error);await wait(500)}
-    if(cancelled)throw Error('Cancelled.');
-    const src=await getSource();setStatus('Preparing stream…',18);
-    const pr=await mediaFetch(playlistUrl(src.url),src.headers||{});
-    const p=parsePlaylist(await pr.text(),playlistUrl(src.url)),ff=await loadFFmpeg(),local=p.lines.slice();
-    let next=0,done=0;const concurrency=6;
-    async function worker(){for(;;){if(cancelled)throw Error('Cancelled.');const n=next++;if(n>=p.segments.length)return;const s=p.segments[n];const rr=await mediaFetch(s.url,src.headers||{});const data=new Uint8Array(await rr.arrayBuffer());const ext=(new URL(s.url).pathname.match(/\.([A-Za-z0-9]+)$/)?.[1]||'bin').toLowerCase();const name=`seg_${String(n).padStart(6,'0')}.${ext}`;await ff.writeFile(name,data);local[s.line]=name;done++;setStatus(`Downloading segments… ${done}/${p.segments.length}`,20+45*done/p.segments.length)}}
-    await Promise.all(Array.from({length:Math.min(concurrency,p.segments.length)},worker));
-    if(cancelled)throw Error('Cancelled.');
-    await ff.writeFile('input.m3u8',new TextEncoder().encode(local.join('\n')));
-    setStatus('Converting on your PC…',68);
-    await ff.exec(['-allowed_extensions','ALL','-i','input.m3u8','-c:v','libx264','-preset','ultrafast','-crf','20','-c:a','aac','-b:a','192k','-movflags','+faststart','output.mp4']);
-    if(cancelled)throw Error('Cancelled.');
-    const bytes=await ff.readFile('output.mp4');objectUrl=URL.createObjectURL(new Blob([bytes],{type:'video/mp4'}));
-    filename.value=baseName(watch)+'.mp4';filename.disabled=false;actions.classList.remove('hidden');
-    const a=document.createElement('a');a.className='action primary';a.textContent='Download MP4';a.href=objectUrl;a.download=filename.value;actions.append(a);
-    video.src=objectUrl;videoWrap.classList.remove('hidden');setStatus('Ready — MP4 created on your PC.',100);stage.classList.add('hidden');
-  }catch(err){
-    if(err.name==='AbortError'||cancelled)error.textContent='Conversion cancelled.';else{error.textContent=err.message||'Conversion failed.';error.classList.remove('hidden')}
-    setStatus(cancelled?'Cancelled':'Conversion failed.',0);
-  }finally{convert.disabled=false;cancel.disabled=true;controller=null;if(cancelled&&ffmpeg){try{ffmpeg.terminate()}catch{}ffmpeg=null}}
-}
-async function run(e){if(e){e.preventDefault();e.stopPropagation()}runConversion()}
-createChoiceUI();
-form.onsubmit=run;
-convert.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();runConversion()});
-input.addEventListener('input',()=>{createChoiceUI();const box=$('sourceChoices');if(box)box.classList.toggle('hidden',!input.value.trim())});
-cancel.onclick=e=>{e.preventDefault();e.stopPropagation();if(convert.disabled){cancelled=true;cancel.disabled=true;cancel.textContent='Cancelling…';if(controller)controller.abort();if(ffmpeg){try{ffmpeg.terminate()}catch{}ffmpeg=null}if(jobId)fetch(`/api/jobs/${jobId}`,{method:'DELETE'}).catch(()=>{})}};
-if(editName)editName.onclick=()=>{filename.disabled=false;filename.focus();filename.select()};
-try{const last=localStorage.getItem('jpDownloaderLastUrl');if(last&&!input.value)input.value=last}catch{}
+function parsePlaylist(text,base){const lines=text.replace(/\r/g,'').split('\n'),segments=[];for(let i=0;i<lines.length;i++){const x=lines[i].trim();if(!x||x.startsWith('#'))continue;try{segments.push({line:i,url:new URL(x,base).href})}catch{}}if(!segments.length)throw Error('No video segments found in playlist.');return{lines,segments}}
+async function mediaFetch(url,headers={}){if(cancelled)throw Error('Cancelled.');try{const r=await fetch(url,{cache:'no-store',signal:controller?.signal});if(r.ok)return r}catch(e){if(cancelled)throw Error('Cancelled.')}const ref=headers.referer?`&referer=${encodeURIComponent(headers.referer)}`:'';const r=await fetch(`/api/media?url=${encodeURIComponent(url)}${ref}`,{cache:'no-store',signal:controller?.signal});if(!r.ok)throw Error(`Media request failed (HTTP ${r.status}).`);return r}
+async function waitForSource(id){for(;;){if(cancelled)throw Error('Cancelled.');const j=await getJob(id);if(j.sourceReady)return getSource(id);if(j.error)throw Error(j.error);await wait(500)}}
+async function discoverSource(){const watch=input.value.trim();if(!watch)throw Error('Paste a watch URL first.');const d=await json('/api/convert',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:watch}),signal:controller?.signal});sourceJobId=d.jobId;return waitForSource(sourceJobId)}
+async function loadFFmpeg(){setStatus('Loading local converter…',3);if(ffmpeg&&ffmpeg.loaded)return ffmpeg;const m=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js');const u=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/dist/esm/index.js');ffmpeg=new m.FFmpeg();ffmpeg.on('progress',({progress:p})=>{if(!cancelled)setStatus('Converting on your PC…',70+Math.min(30,p*30))});await ffmpeg.load({coreURL:await u.toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js','text/javascript'),wasmURL:await u.toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm','application/wasm')});return ffmpeg}
+function createChoiceUI(){if(document.getElementById('sourceChoices'))return;const box=document.createElement('div');box.id='sourceChoices';box.className='source-choices hidden';box.innerHTML=`<div class="source-choice-title">What would you like to do?</div><div class="source-choice-sub">Choose how you want to process the video.</div><div class="source-choice-actions"><button type="button" class="secondary" id="copySource">Copy source link</button><button type="button" class="primary" id="convertOnSite">Convert on-site</button></div><div id="sourceChoiceStatus" class="source-choice-status"></div>`;const style=document.createElement('style');style.textContent='#sourceChoices{margin-top:12px;padding:15px;border:1px solid var(--line);border-radius:11px;background:var(--bg)}.source-choice-title{font-size:13px;font-weight:700;color:var(--white)}.source-choice-sub{font-size:12px;color:var(--muted);margin-top:4px}.source-choice-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}.source-choice-actions button{flex:1;min-width:150px}.source-choice-status{font-size:11px;color:var(--muted);margin-top:9px;min-height:15px}@media(max-width:620px){.source-choice-actions{flex-direction:column}.source-choice-actions button{width:100%}}';document.head.appendChild(style);form.insertAdjacentElement('afterend',box);const copy=$('copySource'),site=$('convertOnSite'),status=$('sourceChoiceStatus');copy.onclick=async()=>{if(copy.disabled)return;cancelled=false;controller=new AbortController();copy.disabled=true;site.disabled=true;status.textContent='Finding video source…';try{localStorage.setItem('jpDownloaderLastUrl',input.value.trim());const src=await discoverSource();const link=playlistUrl(src.url);try{await navigator.clipboard.writeText(link)}catch{const ta=document.createElement('textarea');ta.value=link;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove()}status.textContent='Source link copied.'}catch(err){status.textContent=err.name==='AbortError'?'Cancelled.':(err.message||'Could not find the source.')}finally{copy.disabled=false;site.disabled=false;controller=null}};site.onclick=()=>runConversion()}
+async function runConversion(){if(convert.disabled)return;cancelled=false;controller=new AbortController();panel.classList.remove('hidden');actions.classList.add('hidden');actions.innerHTML='';error.classList.add('hidden');videoWrap.classList.add('hidden');video.removeAttribute('src');convert.disabled=true;cancel.disabled=false;cancel.textContent='Cancel';if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null}const watch=input.value.trim();try{if(!watch)throw Error('Paste a watch URL first.');localStorage.setItem('jpDownloaderLastUrl',watch);setStatus('Starting…',1);const d=await json('/api/convert',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:watch}),signal:controller.signal});jobId=d.jobId;for(;;){if(cancelled)throw Error('Cancelled.');const j=await getJob();setStatus(j.status,Math.min(15,j.progress||0));if(j.sourceReady)break;if(j.error)throw Error(j.error);await wait(500)}if(cancelled)throw Error('Cancelled.');const src=await getSource();setStatus('Preparing stream…',18);const pl=playlistUrl(src.url);const pr=await mediaFetch(pl,src.headers||{});const p=parsePlaylist(await pr.text(),pl),ff=await loadFFmpeg(),local=p.lines.slice();let next=0,done=0;const concurrency=6;async function worker(){for(;;){if(cancelled)throw Error('Cancelled.');const n=next++;if(n>=p.segments.length)return;const s=p.segments[n];const rr=await mediaFetch(s.url,src.headers||{});const data=new Uint8Array(await rr.arrayBuffer());const ext=(new URL(s.url).pathname.match(/\.([A-Za-z0-9]+)$/)?.[1]||'bin').toLowerCase();const name=`seg_${String(n).padStart(6,'0')}.${ext}`;await ff.writeFile(name,data);local[s.line]=name;done++;setStatus(`Downloading segments… ${done}/${p.segments.length}`,20+45*done/p.segments.length)}}await Promise.all(Array.from({length:Math.min(concurrency,p.segments.length)},worker));if(cancelled)throw Error('Cancelled.');await ff.writeFile('input.m3u8',new TextEncoder().encode(local.join('\n')));setStatus('Converting on your PC…',68);await ff.exec(['-allowed_extensions','ALL','-i','input.m3u8','-c:v','libx264','-preset','ultrafast','-crf','20','-c:a','aac','-b:a','192k','-movflags','+faststart','output.mp4']);if(cancelled)throw Error('Cancelled.');const bytes=await ff.readFile('output.mp4');objectUrl=URL.createObjectURL(new Blob([bytes],{type:'video/mp4'}));filename.value=baseName(watch)+'.mp4';filename.disabled=false;actions.classList.remove('hidden');const a=document.createElement('a');a.className='action primary';a.textContent='Download MP4';a.href=objectUrl;a.download=filename.value;actions.append(a);video.src=objectUrl;videoWrap.classList.remove('hidden');setStatus('Ready — MP4 created on your PC.',100);stage.classList.add('hidden')}catch(err){if(err.name==='AbortError'||cancelled)error.textContent='Conversion cancelled.';else{error.textContent=err.message||'Conversion failed.';error.classList.remove('hidden')}setStatus(cancelled?'Cancelled':'Conversion failed.',0)}finally{convert.disabled=false;cancel.disabled=true;controller=null;if(cancelled&&ffmpeg){try{ffmpeg.terminate()}catch{}ffmpeg=null}}}
+function run(e){if(e){e.preventDefault();e.stopPropagation()}runConversion()}
+createChoiceUI();form.onsubmit=run;convert.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();runConversion()});input.addEventListener('input',()=>{const box=$('sourceChoices');if(box)box.classList.toggle('hidden',!input.value.trim())});cancel.onclick=e=>{e.preventDefault();e.stopPropagation();if(convert.disabled){cancelled=true;cancel.disabled=true;cancel.textContent='Cancelling…';if(controller)controller.abort();if(ffmpeg){try{ffmpeg.terminate()}catch{}ffmpeg=null}if(jobId)fetch(`/api/jobs/${jobId}`,{method:'DELETE'}).catch(()=>{})}};if(editName)editName.onclick=()=>{filename.disabled=false;filename.focus();filename.select()};try{const last=localStorage.getItem('jpDownloaderLastUrl');if(last&&!input.value){input.value=last;const box=$('sourceChoices');if(box)box.classList.remove('hidden')}}catch{}
 })();
