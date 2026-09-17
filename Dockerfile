@@ -20,4 +20,4 @@ COPY public ./public
 
 EXPOSE 10000
 
-CMD ["npm", "start"]
+CMD ["node", "server_fast.js"]
