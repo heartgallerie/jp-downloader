@@ -35,7 +35,7 @@ function renderIndex(){
   for(const raw of assets)html=html.split(raw).join(assetProxy(raw));
   html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'');
   html=html.replace(/<script\s+src=["'][^"']*client-fast\.js[^"']*["'][^>]*><\/script>/gi,'');
-  html=html.replace('</body>','<script src="/client-fast.js?v=8" defer></script></body>');
+  html=html.replace('</body>','<script src="/client-fast.js?v=9" defer></script></body>');
   return html;
 }
 app.get('/',(req,res)=>{try{res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');res.type('html').send(renderIndex())}catch(e){console.error('[HTTP] renderIndex failed',e);res.sendStatus(500)}});
@@ -93,12 +93,76 @@ function pickSource(data){
   return walk(data);
 }
 
+function findSourcesPath(html){
+  const patterns=[
+    /\/api\/v1\/(?:videos|episodes|player-log)\/[0-9]+\/sources(?:[?][^"'\s<]*)?/i,
+    /\/api\/v1\/[^"'\s<]+\/sources(?:[?][^"'\s<]*)?/i,
+    /https:\/\/[^"'\s<]+\/api\/v1\/(?:videos|episodes|player-log)\/[0-9]+\/sources(?:[?][^"'\s<]*)?/i
+  ];
+  for(const re of patterns){const m=html.match(re);if(m)return m[0]}
+  return null;
+}
+
+function normalizeSourceUrl(raw){
+  if(!raw)return null;
+  try{
+    const u=new URL(raw);
+    if(!mediaOk(u.toString()))return null;
+    if(!/\.(?:m3u8|json)(?:$|[?])/i.test(u.pathname)&&!u.pathname.endsWith('/index.json'))u.pathname=u.pathname.replace(/\/$/,'')+'/index.json';
+    return u.toString();
+  }catch{return null}
+}
+
+async function directDiscover(watch,j){
+  const u=new URL(watch),site=host(u.hostname),base=`https://${site}`;
+  console.log(`[JOB ${j.id}] direct source discovery start`);
+  const headers={
+    'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0',
+    'accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'accept-language':'en-US,en;q=0.9',
+    'referer':`${base}/`
+  };
+  const html=await text(watch,headers,20000);
+  const sourcesPath=findSourcesPath(html);
+  if(!sourcesPath)throw Error('No sources API path found in watch page.');
+  const endpoint=sourcesPath.startsWith('http')?sourcesPath:new URL(sourcesPath,base).toString();
+  console.log(`[JOB ${j.id}] direct sources endpoint: ${endpoint}`);
+  const response=await text(endpoint,{
+    'user-agent':headers['user-agent'],
+    'accept':'application/json,text/plain,*/*',
+    'referer':watch,
+    'origin':base
+  },15000);
+  let data;
+  try{data=JSON.parse(response)}catch{data=response}
+  let found=pickSource(data);
+  if(!found){
+    const m=response.match(/https:\/\/[^"'\s]+/i);
+    if(m)found={url:m[0]};
+  }
+  const playlist=normalizeSourceUrl(found?.url);
+  if(!playlist)throw Error('Sources API returned no supported media URL.');
+  console.log(`[JOB ${j.id}] direct source found: ${playlist}`);
+  return{url:playlist,headers:{referer:watch,origin:base}};
+}
+
 async function discover(watch,j){
   const u=new URL(watch),site=host(u.hostname);let browser;
   console.log(`[JOB ${j.id}] discover start: ${watch}`);
   try{
     j.status='Finding video';j.progress=5;
-    console.log(`[JOB ${j.id}] launching Playwright`);
+
+    try{
+      j.status='Finding source API';j.progress=10;
+      const direct=await directDiscover(watch,j);
+      j.progress=35;
+      console.log(`[JOB ${j.id}] source found by direct API discovery: ${direct.url}`);
+      return direct;
+    }catch(e){
+      console.log(`[JOB ${j.id}] direct discovery unavailable: ${e.message}`);
+    }
+
+    console.log(`[JOB ${j.id}] launching Playwright fallback`);
     browser=await chromium.launch({headless:true});
     const context=await browser.newContext({viewport:{width:1280,height:800},userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0'});
     const page=await context.newPage();
