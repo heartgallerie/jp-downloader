@@ -19,7 +19,6 @@ function host(h){return(h||'').toLowerCase().replace(/^www\./,'')}
 function watchOk(raw){try{const u=new URL(raw);return u.protocol==='https:'&&SITE_HOSTS.has(host(u.hostname))&&u.pathname.startsWith('/watch/')}catch{return false}}
 function mediaOk(raw){try{const u=new URL(raw);return u.protocol==='https:'&&MEDIA_HOSTS.has(host(u.hostname))}catch{return false}}
 function assetOk(raw){try{const u=new URL(raw);return u.protocol==='https:'&&ASSET_HOSTS.has(host(u.hostname))&&u.pathname.startsWith('/uploads/')}catch{return false}}
-function mediaProxy(raw){return`/api/media?url=${encodeURIComponent(raw)}`}
 function assetProxy(raw){return`/assets/proxy?url=${encodeURIComponent(raw)}`}
 
 function renderIndex(){
@@ -35,7 +34,7 @@ function renderIndex(){
   for(const raw of assets)html=html.split(raw).join(assetProxy(raw));
   html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'');
   html=html.replace(/<script\s+src=["'][^"']*client-fast\.js[^"']*["'][^>]*><\/script>/gi,'');
-  html=html.replace('</body>','<script src="/client-fast.js?v=3"></script></body>');
+  html=html.replace('</body>','<script src="/client-fast.js?v=4"></script></body>');
   return html;
 }
 app.get('/',(req,res)=>{try{res.set('Cache-Control','no-store,no-cache,must-revalidate,proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');res.type('html').send(renderIndex())}catch{res.sendStatus(500)}});
@@ -46,12 +45,22 @@ app.get('/assets/proxy',async(req,res)=>{try{
   const raw=String(req.query.url||'');
   if(!assetOk(raw))return res.sendStatus(400);
   const u=new URL(raw);
-  const r=await fetch(u,{headers:{referer:`https://${host(u.hostname)}/`},redirect:'follow',signal:AbortSignal.timeout(15000)});
-  if(!r.ok)return res.sendStatus(r.status);
+  const site=`https://${host(u.hostname)}/`;
+  const r=await fetch(u,{redirect:'follow',signal:AbortSignal.timeout(20000),headers:{
+    'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0',
+    'accept':'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    'accept-language':'en-US,en;q=0.9',
+    'referer':site,
+    'origin':site.slice(0,-1)
+  }});
+  if(!r.ok)return res.status(r.status).send(`Asset upstream HTTP ${r.status}`);
+  const type=r.headers.get('content-type')||'';
+  if(!type.startsWith('image/'))return res.status(415).send('Asset upstream did not return an image.');
   res.set('Cache-Control','public,max-age=86400');
-  res.set('Content-Type',r.headers.get('content-type')||'image/png');
+  res.set('Content-Type',type);
+  res.set('X-Content-Type-Options','nosniff');
   res.send(Buffer.from(await r.arrayBuffer()));
-}catch{res.sendStatus(502)}});
+}catch(e){res.status(502).send(e.message||'Asset proxy failed.')}});
 
 app.get('/api/media',async(req,res)=>{try{
   const raw=String(req.query.url||'');
